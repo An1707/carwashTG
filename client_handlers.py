@@ -115,4 +115,15 @@ async def my_bookings(message: types.Message):
         for booking in bookings:
             response += f"{booking[0]} - {booking[1]} {booking[2]}\n"
     else:
-        response = "
+        response = "У вас нет активных записей."
+    
+    await message.answer(response)
+    conn.close()
+
+# Регистрация хендлеров для клиентов
+def register_client_handlers(dp):
+    dp.register_message_handler(list_services, commands=['services'])
+    dp.register_message_handler(list_available_times, commands=['available_times'])
+    dp.register_message_handler(book_service, commands=['book'])
+    dp.register_message_handler(cancel_booking, commands=['cancel_booking'])
+    dp.register_message_handler(my_bookings, commands=['my_bookings'])
