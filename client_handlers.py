@@ -1,129 +1,138 @@
-from aiogram import types
-from database import get_db_connection
+from aiogram.filters import Command, StateFilter
+from aiogram import Router, types
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from Database import get_services, create_booking, get_user_bookings, delete_booking, get_available_dates, get_available_times_for_date, add_user, get_user_by_id
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Вывод услуг для клиента
-async def list_services(message: types.Message):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+router = Router()
 
-    cursor.execute("SELECT service_name, price FROM services")
-    services = cursor.fetchall()
-    
-    response = "Доступные услуги:\n"
-    for service in services:
-        response += f"{service[0]} - {service[1]} руб.\n"
-    await message.answer(response)
-    conn.close()
+# Определяем состояния через класс
+class BookingStates(StatesGroup):
+    register_name = State()
+    register_phone = State()
+    choose_service = State()
+    choose_timeslot = State()
 
-# Вывод доступного времени
-async def list_available_times(message: types.Message):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT date, time FROM available_times WHERE is_available = 1")
-    times = cursor.fetchall()
-
-    if times:
-        response = "Доступное время для записи:\n"
-        for time in times:
-            response += f"{time[0]} - {time[1]}\n"
+# Обработка команды /start
+@router.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    user = get_user_by_id(message.from_user.id)
+    if not user:
+        await message.answer("Добро пожаловать! Пожалуйста, зарегистрируйтесь. Введите ваше имя:")
+        await state.set_state(BookingStates.register_name)
     else:
-        response = "Свободного времени нет."
-    
-    await message.answer(response)
-    conn.close()
+        await show_client_menu(message)
 
-# Запись на услугу
-async def book_service(message: types.Message):
-    try:
-        data = message.text.split()
-        service_name = data[1]
-        booking_date = data[2]
-        booking_time = data[3]
+# Процесс регистрации пользователя - ввод имени
+@router.message(StateFilter(BookingStates.register_name))
+async def process_register_name(message: types.Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await message.answer("Введите ваш номер телефона:")
+    await state.set_state(BookingStates.register_phone)
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
+# Процесс регистрации пользователя - ввод телефона
+@router.message(StateFilter(BookingStates.register_phone))
+async def process_register_phone(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    name = data['name']
+    phone = message.text
+    add_user(message.from_user.id, name, phone)
+    await message.answer(f"Регистрация завершена! Добро пожаловать, {name}.")
+    await show_client_menu(message)
+    await state.clear()
 
-        cursor.execute("SELECT service_id FROM services WHERE service_name = ?", (service_name,))
-        service = cursor.fetchone()
+# Меню клиента
+async def show_client_menu(message: types.Message):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Записаться на мойку", callback_data='book_service')],
+        [InlineKeyboardButton(text="Просмотр услуг", callback_data='view_services')],
+        [InlineKeyboardButton(text="Отмена записи", callback_data='cancel_booking')],
+        [InlineKeyboardButton(text="История записей", callback_data='booking_history')]
+    ])
+    await message.answer("Меню клиента:", reply_markup=keyboard)
 
-        if not service:
-            await message.answer("Услуга не найдена.")
-            return
+# Обработка записи на услугу
+@router.callback_query(lambda c: c.data == 'book_service')
+async def handle_book_service(callback_query: types.CallbackQuery, state: FSMContext):
+    # Получаем список доступных услуг
+    services = get_services()
+    if services:
+        # Создаем инлайн-кнопки для каждой услуги
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{service[1]} - {service[2]} руб.", callback_data=f"service_{service[0]}")] for service in services
+        ])
+        await callback_query.message.answer("Выберите услугу:", reply_markup=keyboard)
+        await state.set_state(BookingStates.choose_service)
+    else:
+        await callback_query.message.answer("Нет доступных услуг.")
+    await callback_query.answer()
 
-        user_id = message.from_user.id
-        service_id = service[0]
+# Обработка выбора услуги
+@router.callback_query(lambda c: c.data.startswith("service_"))
+async def choose_service(callback_query: types.CallbackQuery, state: FSMContext):
+    selected_service_id = int(callback_query.data.split("_")[1])
+    await state.update_data(selected_service_id=selected_service_id)
 
-        cursor.execute("SELECT * FROM available_times WHERE date = ? AND time = ? AND is_available = 1", 
-                       (booking_date, booking_time))
-        time_slot = cursor.fetchone()
+    # Переходим к выбору даты
+    dates = get_available_dates()
+    if dates:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=date, callback_data=f"date_{date}")] for date in dates
+        ])
+        await callback_query.message.answer("Выберите дату:", reply_markup=keyboard)
+        await state.set_state(BookingStates.choose_timeslot)
+    else:
+        await callback_query.message.answer("Нет доступных дат.")
+    await callback_query.answer()
 
-        if time_slot:
-            cursor.execute("INSERT INTO bookings (user_id, service_id, date, time) VALUES (?, ?, ?, ?)", 
-                           (user_id, service_id, booking_date, booking_time))
-            cursor.execute("UPDATE available_times SET is_available = 0 WHERE date = ? AND time = ?", 
-                           (booking_date, booking_time))
-            conn.commit()
-            await message.answer(f"Вы успешно записаны на {service_name} {booking_date} в {booking_time}")
-        else:
-            await message.answer("Это время недоступно для записи.")
-        conn.close()
-    except Exception as e:
-        await message.answer("Ошибка при записи. Используйте формат: /book [услуга] [дата] [время]")
+# Обработка выбора даты
+@router.callback_query(lambda c: c.data.startswith("date_"))
+async def choose_timeslot_for_date(callback_query: types.CallbackQuery, state: FSMContext):
+    selected_date = callback_query.data.split("_")[1]
+    await state.update_data(selected_date=selected_date)
+
+    timeslots = get_available_times_for_date(selected_date)
+    if timeslots:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=timeslot[1], callback_data=f"timeslot_{timeslot[0]}")] for timeslot in timeslots
+        ])
+        await callback_query.message.answer(f"Выберите время на {selected_date}:", reply_markup=keyboard)
+        await state.set_state(BookingStates.choose_timeslot)
+    else:
+        await callback_query.message.answer(f"Нет доступных временных слотов на {selected_date}.")
+    await callback_query.answer()
+
+# История записей
+@router.callback_query(lambda c: c.data == 'booking_history')
+async def handle_booking_history(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    bookings = get_user_bookings(user_id)
+    if bookings:
+        history = "\n".join([f"{b[1]} - {b[2]}" for b in bookings])
+        await callback_query.message.answer(f"История ваших записей:\n{history}")
+    else:
+        await callback_query.message.answer("У вас нет записей.")
+    await callback_query.answer()
 
 # Отмена записи
-async def cancel_booking(message: types.Message):
-    try:
-        data = message.text.split()
-        booking_id = int(data[1])
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        user_id = message.from_user.id
-        cursor.execute("SELECT * FROM bookings WHERE booking_id = ? AND user_id = ?", (booking_id, user_id))
-        booking = cursor.fetchone()
-
-        if booking:
-            cursor.execute("DELETE FROM bookings WHERE booking_id = ?", (booking_id,))
-            cursor.execute("UPDATE available_times SET is_available = 1 WHERE date = ? AND time = ?", 
-                           (booking[2], booking[3]))
-            conn.commit()
-            await message.answer("Ваша запись отменена.")
-        else:
-            await message.answer("Запись не найдена.")
-        conn.close()
-    except Exception as e:
-        await message.answer("Ошибка при отмене записи. Используйте формат: /cancel_booking [ID записи]")
-
-# Просмотр текущих записей
-async def my_bookings(message: types.Message):
-    user_id = message.from_user.id
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT services.service_name, bookings.date, bookings.time 
-        FROM bookings 
-        JOIN services ON bookings.service_id = services.service_id 
-        WHERE bookings.user_id = ?
-    """, (user_id,))
-    bookings = cursor.fetchall()
-
+@router.callback_query(lambda c: c.data == 'cancel_booking')
+async def handle_cancel_booking(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    bookings = get_user_bookings(user_id)
     if bookings:
-        response = "Ваши записи:\n"
-        for booking in bookings:
-            response += f"{booking[0]} - {booking[1]} {booking[2]}\n"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{b[1]} - {b[2]}", callback_data=f"cancel_{b[0]}")] for b in bookings
+        ])
+        await callback_query.message.answer("Выберите запись для отмены:", reply_markup=keyboard)
     else:
-        response = "У вас нет активных записей."
-    
-    await message.answer(response)
-    conn.close()
+        await callback_query.message.answer("У вас нет активных записей.")
+    await callback_query.answer()
 
-# Регистрация хендлеров для клиентов
-def register_client_handlers(dp):
-    dp.register_message_handler(list_services, commands=['services'])
-    dp.register_message_handler(list_available_times, commands=['available_times'])
-    dp.register_message_handler(book_service, commands=['book'])
-    dp.register_message_handler(cancel_booking, commands=['cancel_booking'])
-    dp.register_message_handler(my_bookings, commands=['my_bookings'])
+# Обработка отмены записи
+@router.callback_query(lambda c: c.data.startswith("cancel_"))
+async def process_cancel_booking(callback_query: types.CallbackQuery):
+    booking_id = int(callback_query.data.split("_")[1])
+    delete_booking(booking_id)
+    await callback_query.message.answer("Запись успешно отменена.")
+    await callback_query.answer()
