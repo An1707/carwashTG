@@ -46,7 +46,7 @@ async def process_register_phone(message: types.Message, state: FSMContext):
 async def show_client_menu(message: types.Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Записаться на мойку", callback_data='book_service')],
-        [InlineKeyboardButton(text="Просмотр услуг", callback_data='view_services')],
+        [InlineKeyboardButton(text="Просмотр услуг", callback_data='view_services')],  # Добавлена кнопка для просмотра услуг
         [InlineKeyboardButton(text="Отмена записи", callback_data='cancel_booking')],
         [InlineKeyboardButton(text="История записей", callback_data='booking_history')]
     ])
@@ -55,15 +55,24 @@ async def show_client_menu(message: types.Message):
 # Обработка записи на услугу
 @router.callback_query(lambda c: c.data == 'book_service')
 async def handle_book_service(callback_query: types.CallbackQuery, state: FSMContext):
-    # Получаем список доступных услуг
     services = get_services()
     if services:
-        # Создаем инлайн-кнопки для каждой услуги
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"{service[1]} - {service[2]} руб.", callback_data=f"service_{service[0]}")] for service in services
         ])
         await callback_query.message.answer("Выберите услугу:", reply_markup=keyboard)
         await state.set_state(BookingStates.choose_service)
+    else:
+        await callback_query.message.answer("Нет доступных услуг.")
+    await callback_query.answer()
+
+# Новый обработчик для просмотра услуг
+@router.callback_query(lambda c: c.data == 'view_services')
+async def handle_view_services(callback_query: types.CallbackQuery):
+    services = get_services()
+    if services:
+        services_list = "\n".join([f"{service[1]} - {service[2]} руб." for service in services])
+        await callback_query.message.answer(f"Доступные услуги:\n{services_list}")
     else:
         await callback_query.message.answer("Нет доступных услуг.")
     await callback_query.answer()
@@ -95,12 +104,26 @@ async def choose_timeslot_for_date(callback_query: types.CallbackQuery, state: F
     timeslots = get_available_times_for_date(selected_date)
     if timeslots:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=timeslot[1], callback_data=f"timeslot_{timeslot[0]}")] for timeslot in timeslots
+            [InlineKeyboardButton(text=timeslot[1].split(':')[0] + ":" + timeslot[1].split(':')[1], callback_data=f"timeslot_{timeslot[0]}")] for timeslot in timeslots
         ])
         await callback_query.message.answer(f"Выберите время на {selected_date}:", reply_markup=keyboard)
         await state.set_state(BookingStates.choose_timeslot)
     else:
         await callback_query.message.answer(f"Нет доступных временных слотов на {selected_date}.")
+    await callback_query.answer()
+
+# Обработка выбора временного слота
+@router.callback_query(lambda c: c.data.startswith("timeslot_"))
+async def handle_timeslot_selection(callback_query: types.CallbackQuery, state: FSMContext):
+    selected_timeslot_id = int(callback_query.data.split("_")[1])
+    data = await state.get_data()
+    selected_service_id = data.get('selected_service_id')
+    user_id = callback_query.from_user.id
+
+    # Создаем запись в базе данных
+    create_booking(user_id, selected_service_id, selected_timeslot_id)
+    await callback_query.message.answer("Запись успешно создана!")
+    await state.clear()
     await callback_query.answer()
 
 # История записей
